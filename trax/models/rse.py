@@ -147,7 +147,7 @@ def shuffle_layer(inputs, shuffle_fn):
     tf.Tensor: Inputs shifted according to shuffle_fn
   """
   seq_length = inputs.shape[1]
-  n_bits = np.int32(np.ceil(np.log(seq_length - 1) / np.log(2.0)))
+  n_bits = np.int32(np.log(seq_length - 1) / np.log(2.0)) + 1
 
   indices = np.arange(0, seq_length).astype('int32')
   rev_indices = shuffle_fn(indices, n_bits)
@@ -157,10 +157,70 @@ def shuffle_layer(inputs, shuffle_fn):
 @assert_shape('bld->bld')
 def ShuffleLayer():
   return tl.Fn(
-      'ShuffleLayer', lambda x: shuffle_layer(x, ror), n_out=1)
+      'ShuffleLayer', lambda x: shuffle_layer(x, rol), n_out=1)
 
 
 @assert_shape('bld->bld')
 def ReverseShuffleLayer():
   return tl.Fn(
-      'ReverseShuffleLayer', lambda x: shuffle_layer(x, rol), n_out=1)
+      'ReverseShuffleLayer', lambda x: shuffle_layer(x, ror), n_out=1)
+
+
+@assert_shape('...,bld->...,bld')
+def ForwardStep(d_model, dropout, mode):
+  """Takes (n_layer, state) and returns (n_layer, shuffle_layer(rsu(state)))."""
+  return tl.Parallel([], tl.Serial(
+      ResidualSwitchUnit(d_model, dropout, mode),
+      ShuffleLayer(),
+  ))
+
+
+@assert_shape('...,bld->...,bld')
+def BackwardStep(d_model, dropout, mode):
+  """Takes (n_layer, state) and returns (n_layer, reverse_shuffle_layer(rsu(state)))."""
+  return tl.Parallel([], tl.Serial(
+      ResidualSwitchUnit(d_model, dropout, mode),
+      ReverseShuffleLayer(),
+  ))
+
+
+@assert_shape('bld->bld')
+def BenesBlock(d_model, dropout, mode):
+  def bit_sequence(inputs):
+    seq_length = inputs.shape[1]
+    n_bits = np.int32(np.log(seq_length - 1) / np.log(2.0)) + 1
+    return jnp.arange(0, n_bits)
+  return tl.Serial(
+      tl.Dup(),
+      tl.Fn('BitSeq', bit_sequence, n_out=1),
+      tl.Scan(ForwardStep(d_model, dropout, mode)),
+      tl.Scan(BackwardStep(d_model, dropout, mode)),
+      tl.Select([1]),
+  )
+
+
+@assert_shape('...,bld->...,bld')
+def BenesBlockLoop(d_model, dropout, mode):
+  """Takes (n_block, state) and returns (n_block, BenesBlock(state))."""
+  return tl.Parallel([], BenesBlock(d_model, dropout, mode))
+
+
+@assert_shape('bl->blv')
+def ResidualShuffleExchange(vocab_size,
+                            d_model,
+                            dropout,
+                            mode='train',
+                            n_blocks=2):
+  """Returns a Residual Shuffle Exchange Network model."""
+  return tl.Serial(
+      tl.Embedding(vocab_size, d_model),
+      # Apply Benes Block n_blocks times.
+      tl.Dup(),
+      tl.Fn('BlockIdx', lambda x: np.arange(0, n_blocks), n_out=1),
+      tl.Scan(BenesBlockLoop(d_model, dropout, mode)),
+      tl.Select([1]),
+      ResidualSwitchUnit(d_model, dropout, mode),
+      # Produce probabilities.
+      tl.Dense(vocab_size),
+      tl.LogSoftmax(),
+  )

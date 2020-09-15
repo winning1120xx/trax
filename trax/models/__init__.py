@@ -22,6 +22,7 @@ from trax.models import neural_gpu
 from trax.models import resnet
 from trax.models import rl
 from trax.models import rnn
+from trax.models import rse
 from trax.models import transformer
 from trax.models.reformer import reformer
 from trax.models.research import bert
@@ -86,3 +87,4 @@ Quality = model_configure(rl.Quality)
 RNNLM = model_configure(rnn.RNNLM)
 GRULM = model_configure(rnn.GRULM)
 LSTMSeq2SeqAttn = model_configure(rnn.LSTMSeq2SeqAttn)
+ResidualShuffleExchange = model_configure(rse.ResidualShuffleExchange)
